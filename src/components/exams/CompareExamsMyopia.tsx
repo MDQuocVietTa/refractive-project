@@ -1,264 +1,353 @@
 "use client";
+
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { format } from "date-fns";
 
 /**
- * Compare exams: rows = exam instances, columns = chosen metrics.
- * Drop-in client component for /patients/[id]/result.
+ * CompareExamsMyopia.tsx
+ * Drop-in cho trang /patients/[id] hoặc tương tự.
+ * Props: patientId (UUID của bảng patients.id)
  *
- * USAGE in a page:
- *   <CompareExamsMyopia patientId={params.id} />
- *
- * Required env (already typical in this project):
- *   NEXT_PUBLIC_SUPABASE_URL
- *   NEXT_PUBLIC_SUPABASE_ANON_KEY
+ * Phù hợp schema hiện tại trong dự án:
+ *   table: exams
+ *   columns: id (uuid), patient_id (uuid), exam_date (date),
+ *            exam_type ('comprehensive' | 'myopia_control'),
+ *            status ('draft' | 'final'),
+ *            payload_inputs jsonb,
+ *            created_at, updated_at
  */
 
-// ==== 1) Supabase browser client ====
-
-
-// ==== 2) Types ====
-export type ExamRow = {
+type ExamRow = {
   id: string;
   patient_id: string;
   exam_date: string; // ISO date
-  exam_type: "myopia_progression" | "refractive_exam";
+  exam_type: "comprehensive" | "myopia_control";
   status: "draft" | "final";
-  payload_inputs: any; // JSONB
+  payload_inputs: Record<string, unknown> | null;
   created_at: string;
 };
 
-// ==== 3) Metric config: add more later without changing logic ====
-// JSON paths are dot-notation inside payload_inputs
-// Adjust paths to match your real payload schema.
 type MetricDef = {
-  key: string;
+  key: string; // unique
   label: string;
-  path?: string;
-  compute?: (p: any) => any;
+  unit?: string;
+  // JSON path trong payload_inputs, dot-notation
+  // Ví dụ bạn có thể đổi cho đúng schema thực tế:
+  // "biometry.OD.AL", "biometry.OD.ACD", "biometry.OD.LT"
+  path: string;
+  // Hàm chuyển đổi nếu cần (vd: string -> number)
+  map?: (v: unknown) => number | string | null;
 };
 
-const METRIC_CATALOG: MetricDef[] = [
-  { key: "AL_OD",  label: "AL OD (mm)",  path: "al_od" },
-  { key: "AL_OS",  label: "AL OS (mm)",  path: "al_os" },
-  { key: "ACD_OD", label: "ACD OD (mm)", path: "acd_od" },
-  { key: "ACD_OS", label: "ACD OS (mm)", path: "acd_os" },
-  { key: "LT_OD",  label: "LT OD (mm)",  path: "lt_od" },
-  { key: "LT_OS",  label: "LT OS (mm)",  path: "lt_os" },
-  { key: "SEQ_OD", label: "SEQ OD (D)",  compute: (p) => seqFrom("od", p) },
-  { key: "SEQ_OS", label: "SEQ OS (D)",  compute: (p) => seqFrom("os", p) },
+type Props = {
+  patientId: string;
+};
+
+// ==== cấu hình metric mặc định ====
+const METRICS: MetricDef[] = [
+  {
+    key: "od_al",
+    label: "AL OD",
+    unit: "mm",
+    path: "biometry.OD.AL",
+    map: toNumberOrNull,
+  },
+  {
+    key: "od_acd",
+    label: "ACD OD",
+    unit: "mm",
+    path: "biometry.OD.ACD",
+    map: toNumberOrNull,
+  },
+  {
+    key: "od_lt",
+    label: "LT OD",
+    unit: "mm",
+    path: "biometry.OD.LT",
+    map: toNumberOrNull,
+  },
+  // Thêm OS nếu cần
+  {
+    key: "os_al",
+    label: "AL OS",
+    unit: "mm",
+    path: "biometry.OS.AL",
+    map: toNumberOrNull,
+  },
 ];
 
-// ==== 4) Helpers ====
-function getAt(obj: any, path: string) {
-  if (!obj) return undefined;
-  return path.split(".").reduce((acc, k) => (acc ? acc[k] : undefined), obj);
-}
-
-function byDateAsc(a: ExamRow, b: ExamRow) {
-  return new Date(a.exam_date).getTime() - new Date(b.exam_date).getTime();
-}
-
-// ==== 5) Component ====
-export default function CompareExamsMyopia({ patientId }: { patientId: string }) {
-  const [loading, setLoading] = useState(true);
+export default function CompareExamsMyopia({ patientId }: Props) {
+  const [rows, setRows] = useState<ExamRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [onlyFinal, setOnlyFinal] = useState(true);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>(
+    METRICS.map((m) => m.key).slice(0, 3)
+  );
   const [error, setError] = useState<string | null>(null);
-  const [exams, setExams] = useState<ExamRow[]>([]);
 
-  // checked exam ids
-  const [selected, setSelected] = useState<string[]>([]);
-
-  // chosen metric keys
-  const [metrics, setMetrics] = useState<string[]>(["AL_OD","AL_OS","ACD_OD","ACD_OS","LT_OD","LT_OS","SEQ_OD","SEQ_OS"]);
-  // fetch exams for this patient (myopia_control only by default but allow toggle)
-  const [onlyMyopia, setOnlyMyopia] = useState(true);
-
+  // fetch exams
   useEffect(() => {
-    let mounted = true;
-    (async () => {
+    let active = true;
+    async function run() {
       setLoading(true);
       setError(null);
-      const q = supabase
+      const query = supabase
         .from("exams")
-        .select("id, patient_id, exam_date, exam_type, status, payload_inputs, created_at")
+        .select(
+          "id, patient_id, exam_date, exam_type, status, payload_inputs, created_at"
+        )
         .eq("patient_id", patientId)
-        .order("exam_date", { ascending: true });
+        .order("exam_date", { ascending: true })
+        .order("created_at", { ascending: true });
 
-      const { data, error } = await q;
-      if (!mounted) return;
-      if (error) {
-        setError(error.message);
-        setLoading(false);
-        return;
+      const { data, error: err } = await query;
+      if (!active) return;
+      if (err) {
+        setError(err.message ?? "Fetch error");
+        setRows([]);
+      } else {
+        setRows((data ?? []) as ExamRow[]);
       }
-      const rows = (data as ExamRow[]) || [];
-      const filtered = onlyMyopia ? rows.filter(r => r.exam_type === "myopia_progression") : rows;
-      setExams(filtered);
       setLoading(false);
-    })();
+    }
+    run();
     return () => {
-      mounted = false;
+      active = false;
     };
-  }, [patientId, onlyMyopia]);
+  }, [patientId]);
 
-  // computed view
-  const metricDefs = METRIC_CATALOG.filter(m => metrics.includes(m.key));
+  const filtered = useMemo(() => {
+    const base = onlyFinal ? rows.filter((r) => r.status === "final") : rows;
+    return base;
+  }, [rows, onlyFinal]);
 
-  const allChecked = selected.length > 0 && selected.length === exams.length;
-  const anyChecked = selected.length > 0;
+  const selectedMetrics = useMemo(
+    () => METRICS.filter((m) => selectedKeys.includes(m.key)),
+    [selectedKeys]
+  );
 
-  function toggleOne(id: string) {
-    setSelected(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+  const table = useMemo(() => {
+    return filtered.map((r) => {
+      const obj: Record<string, unknown> = {
+        date: prettyDate(r.exam_date),
+        type: r.exam_type,
+      };
+      for (const m of selectedMetrics) {
+        const raw = getAtPath(r.payload_inputs ?? {}, m.path);
+        const mapped = (m.map ? m.map(raw) : raw) as string | number | null;
+          obj[m.key] =
+            mapped === null || mapped === undefined || mapped === ""
+              ? null
+              : mapped;
+      }
+      return obj;
+    });
+  }, [filtered, selectedMetrics]);
+
+  function toggleMetric(k: string) {
+    setSelectedKeys((prev) =>
+      prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]
+    );
   }
-  function toggleAll() {
-    if (allChecked) setSelected([]);
-    else setSelected(exams.map(e => e.id));
-  }
-
-  const rows = useMemo(() => {
-    const base = exams.slice().sort(byDateAsc);
-    const chosen = anyChecked ? base.filter(e => selected.includes(e.id)) : base;
-    return chosen;
-  }, [exams, selected, anyChecked]);
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-xl font-semibold">So sánh thẻ khám</h2>
-        <label className="inline-flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={onlyMyopia} onChange={e => setOnlyMyopia(e.target.checked)} />
-          Chỉ hiển thị loại "myopia_progression"
-        </label>
-        <button
-          className="px-3 py-1.5 rounded-xl border hover:shadow text-sm"
-          onClick={toggleAll}
-          disabled={exams.length === 0}
-        >
-          {allChecked ? "Bỏ chọn tất cả" : "Chọn tất cả"}
-        </button>
-        <MetricPicker metrics={metrics} setMetrics={setMetrics} />
-      </div>
-
-      {loading && <div className="text-sm">Đang tải...</div>}
-      {error && <div className="text-sm text-red-600">Lỗi: {error}</div>}
-
-      {!loading && exams.length === 0 && (
-        <div className="text-sm">Không có thẻ khám phù hợp.</div>
-      )}
-
-      {!loading && exams.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-sm border-collapse">
-                <thead>
-                    <tr className="border-b">
-                        <th className="p-2 w-8 text-left"></th>
-                        <th className="p-2 text-left whitespace-nowrap">Ngày khám</th>
-                        {metricDefs.map((m) => (
-                        <th key={m.key} className="p-2 text-left whitespace-nowrap">
-                            {m.label}
-                        </th>
-                        ))}
-                    </tr>
-                </thead>
-
-            <tbody>
-                {rows.map((e) => (
-                    <tr key={e.id} className="border-b hover:bg-gray-50/50">
-                        {/* checkbox */}
-                        <td className="p-2 align-top">
-                        <input
-                            type="checkbox"
-                            checked={selected.includes(e.id)}
-                            onChange={() => toggleOne(e.id)}
-                            aria-label={`chọn thẻ ${e.id}`}
-                        />
-                        </td>
-
-                        {/* ngày khám */}
-                        <td className="p-2 align-top">
-                        {e.exam_date ? new Date(e.exam_date).toLocaleDateString("vi-VN") : "—"}
-                        </td>
-
-                        {/* các chỉ số */}
-                        {metricDefs.map(m => {
-                        const v = m.compute ? m.compute(e.payload_inputs) : getAt(e.payload_inputs, m.path!);
-                        return (
-                            <td key={m.key} className="p-2 align-top tabular-nums">
-                            {formatValue(v)}
-                            </td>
-                        );
-                        })}
-                    </tr>
-                    ))}
-
-                </tbody>
-          </table>
+      <header className="flex flex-wrap items-center gap-3">
+        <h2 className="text-xl font-semibold">So sánh chỉ số kiểm soát cận</h2>
+        <span className="text-sm opacity-70">
+          Tổng {filtered.length}/{rows.length} lần khám
+        </span>
+        <div className="ml-auto flex items-center gap-3">
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={onlyFinal}
+              onChange={(e) => setOnlyFinal(e.target.checked)}
+            />
+            Chỉ hiển thị bản “final”
+          </label>
+          <button
+            className="px-3 py-1.5 rounded-xl border text-sm hover:bg-gray-100"
+            onClick={() => refreshNow(setLoading, setError, setRows, patientId)}
+          >
+            Làm mới
+          </button>
         </div>
-      )}
+      </header>
 
-      <div className="text-xs text-gray-500">Gợi ý: nếu chưa chọn thẻ nào, bảng sẽ hiển thị tất cả. Khi chọn, chỉ hiển thị các thẻ được chọn.</div>
+      <section className="rounded-2xl border p-3">
+        <p className="text-sm font-medium mb-2">Chọn chỉ số</p>
+        <div className="flex flex-wrap gap-3">
+          {METRICS.map((m) => (
+            <label
+              key={m.key}
+              className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded-xl border"
+            >
+              <input
+                type="checkbox"
+                checked={selectedKeys.includes(m.key)}
+                onChange={() => toggleMetric(m.key)}
+              />
+              {m.label}
+              {m.unit ? <span className="opacity-60">({m.unit})</span> : null}
+            </label>
+          ))}
+        </div>
+      </section>
+
+      <section className="rounded-2xl border overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <Th>Ngày khám</Th>
+              <Th>Loại</Th>
+              {selectedMetrics.map((m) => (
+                <Th key={m.key}>
+                  {m.label} {m.unit ? `(${m.unit})` : ""}
+                </Th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <Td colSpan={2 + selectedMetrics.length}>Đang tải…</Td>
+              </tr>
+            ) : error ? (
+              <tr>
+                <Td colSpan={2 + selectedMetrics.length} className="text-red-600">
+                  Lỗi: {error}
+                </Td>
+              </tr>
+            ) : table.length === 0 ? (
+              <tr>
+                <Td colSpan={2 + selectedMetrics.length}>Không có dữ liệu</Td>
+              </tr>
+            ) : (
+              table.map((row, idx) => (
+                <tr key={idx} className="odd:bg-white even:bg-gray-50">
+                  <Td>{row.date as string}</Td>
+                  <Td>{row.type as string}</Td>
+                  {selectedMetrics.map((m) => (
+                    <Td key={m.key}>{fmt(row[m.key])}</Td>
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </section>
+
+      <NoteBlock />
     </div>
   );
 }
 
-function formatValue(v: any) {
-  if (v === null || v === undefined || v === "") return "—";
-  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "—";
-  if (typeof v === "string") return v;
-  return JSON.stringify(v);
+// ==== helpers ====
+
+function Th({ children }: { children: React.ReactNode }) {
+  return (
+    <th className="text-left px-3 py-2 font-semibold whitespace-nowrap">
+      {children}
+    </th>
+  );
 }
-function isNum(x: any) { return typeof x === "number" && Number.isFinite(x); }
-function round2(n: number) { return Math.round(n * 100) / 100; }
 
-function seqFrom(side: "od" | "os", p: any) {
-  const sph1 = getAt(p, `mani_${side}_sph`);
-  const cyl1 = getAt(p, `mani_${side}_cyl`);
-  if (isNum(sph1) && isNum(cyl1)) return round2(sph1 + cyl1 / 2);
+function Td({
+  children,
+  colSpan,
+  className,
+}: {
+  children: React.ReactNode;
+  colSpan?: number;
+  className?: string;
+}) {
+  return (
+    <td
+      className={`px-3 py-2 align-top whitespace-nowrap ${className ?? ""}`}
+      colSpan={colSpan}
+    >
+      {children}
+    </td>
+  );
+}
 
-  const sph2 = getAt(p, `wet_${side}_sph`);
-  const cyl2 = getAt(p, `wet_${side}_cyl`);
-  if (isNum(sph2) && isNum(cyl2)) return round2(sph2 + cyl2 / 2);
-
-  const sph3 = getAt(p, `dry_${side}_sph`);
-  const cyl3 = getAt(p, `dry_${side}_cyl`);
-  if (isNum(sph3) && isNum(cyl3)) return round2(sph3 + cyl3 / 2);
-
+function toNumberOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v.replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  }
   return null;
 }
 
+function getAtPath(obj: Record<string, unknown>, path: string): unknown {
+  if (!obj) return null;
+  const parts = path.split(".");
+  let cur: any = obj;
+  for (const p of parts) {
+    if (cur == null || typeof cur !== "object") return null;
+    cur = cur[p];
+  }
+  return cur;
+}
 
-function MetricPicker({ metrics, setMetrics }: { metrics: string[]; setMetrics: (v: string[]) => void }) {
-  const [open, setOpen] = useState(false);
+function fmt(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "—";
+  if (typeof v === "string" && v.trim() !== "") return v;
+  return "—";
+}
+
+function prettyDate(d: string | null | undefined): string {
+  if (!d) return "—";
+  try {
+    // d có thể là "2025-09-08" hoặc ISO
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return d;
+    const yyyy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, "0");
+    const dd = String(dt.getDate()).padStart(2, "0");
+    return `${dd}/${mm}/${yyyy}`;
+  } catch {
+    return d;
+  }
+}
+
+async function refreshNow(
+  setLoading: (v: boolean) => void,
+  setError: (v: string | null) => void,
+  setRows: (v: ExamRow[]) => void,
+  patientId: string
+) {
+  setLoading(true);
+  setError(null);
+  const { data, error } = await supabase
+    .from("exams")
+    .select(
+      "id, patient_id, exam_date, exam_type, status, payload_inputs, created_at"
+    )
+    .eq("patient_id", patientId)
+    .order("exam_date", { ascending: true })
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    setError(error.message ?? "Fetch error");
+    setRows([]);
+  } else {
+    setRows((data ?? []) as ExamRow[]);
+  }
+  setLoading(false);
+}
+
+function NoteBlock() {
   return (
-    <div className="relative">
-      <button className="px-3 py-1.5 rounded-xl border hover:shadow text-sm" onClick={() => setOpen(o => !o)}>
-        Chọn chỉ số ({metrics.length})
-      </button>
-      {open && (
-        <div className="absolute z-10 mt-2 w-64 max-h-72 overflow-auto rounded-xl border bg-white shadow">
-          <div className="p-2 text-xs text-gray-500">Bật/tắt cột</div>
-          <ul className="p-2 space-y-1">
-            {METRIC_CATALOG.map(m => {
-              const checked = metrics.includes(m.key);
-              return (
-                <li key={m.key} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => {
-                      if (checked) setMetrics(metrics.filter(k => k !== m.key));
-                      else setMetrics([...metrics, m.key]);
-                    }}
-                    id={`metric-${m.key}`}
-                  />
-                  <label htmlFor={`metric-${m.key}`} className="cursor-pointer select-none">{m.label}</label>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
+    <div className="text-xs opacity-70">
+      Gợi ý: đổi các <code>path</code> trong cấu hình metric cho đúng khóa thực tế
+      trong <code>payload_inputs</code>. Ví dụ{" "}
+      <code>biometry.OD.AL</code>, <code>biometry.OS.AL</code>. Không cần sửa
+      logic.
     </div>
   );
 }
