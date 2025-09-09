@@ -128,17 +128,15 @@ export default function CompareExamsMyopia({ patientId }: Props) {
 
   const table = useMemo(() => {
     return filtered.map((r) => {
-      const obj: Record<string, unknown> = {
-        date: prettyDate(r.exam_date),
-        type: r.exam_type,
-      };
-      for (const m of selectedMetrics) {
+      // nơi tạo obj trong useMemo
+        const obj: Record<string, unknown> = {
+          date: prettyDate(r.exam_date),
+          type: r.exam_type,
+        };
         const raw = getAtPath(r.payload_inputs ?? {}, m.path);
         const mapped = (m.map ? m.map(raw) : raw) as string | number | null;
-          obj[m.key] =
-            mapped === null || mapped === undefined || mapped === ""
-              ? null
-              : mapped;
+        obj[m.key] = mapped === null || mapped === undefined || mapped === "" ? null : mapped;
+
       }
       return obj;
     });
@@ -282,16 +280,19 @@ function toNumberOrNull(v: unknown): number | null {
   return null;
 }
 
-function getAtPath(obj: Record<string, unknown>, path: string): unknown {
-  if (!obj) return null;
-  const parts = path.split(".");
-  let cur: any = obj;
-  for (const p of parts) {
-    if (cur == null || typeof cur !== "object") return null;
-    cur = cur[p];
+function getAtPath(obj: unknown, path: string): unknown {
+  if (!obj || typeof obj !== "object") return null;
+  let cur: unknown = obj;
+  for (const key of path.split(".")) {
+    if (cur && typeof cur === "object" && key in (cur as Record<string, unknown>)) {
+      cur = (cur as Record<string, unknown>)[key];
+    } else {
+      return null;
+    }
   }
   return cur;
 }
+
 
 function fmt(v: unknown): string {
   if (v === null || v === undefined) return "—";
@@ -344,10 +345,8 @@ async function refreshNow(
 function NoteBlock() {
   return (
     <div className="text-xs opacity-70">
-      Gợi ý: đổi các <code>path</code> trong cấu hình metric cho đúng khóa thực tế
-      trong <code>payload_inputs</code>. Ví dụ{" "}
-      <code>biometry.OD.AL</code>, <code>biometry.OS.AL</code>. Không cần sửa
-      logic.
+      Goi y: doi cac <code>path</code> trong cau hinh metric cho dung khoa thuc te
+      trong <code>payload_inputs</code>. Vi du <code>biometry.OD.AL</code>, <code>biometry.OS.AL</code>. Khong can sua logic.
     </div>
   );
 }
