@@ -5,16 +5,8 @@ import { supabase } from "@/lib/supabase";
 
 /**
  * CompareExamsMyopia.tsx
- * Drop-in cho trang /patients/[id] hoặc tương tự.
- * Props: patientId (UUID của bảng patients.id)
- *
- * Phù hợp schema hiện tại trong dự án:
- *   table: exams
- *   columns: id (uuid), patient_id (uuid), exam_date (date),
- *            exam_type ('comprehensive' | 'myopia_control'),
- *            status ('draft' | 'final'),
- *            payload_inputs jsonb,
- *            created_at, updated_at
+ * Hiển thị bảng so sánh các chỉ số theo thời gian cho 1 bệnh nhân.
+ * Props: patientId (UUID trong bảng patients.id)
  */
 
 type ExamRow = {
@@ -28,52 +20,21 @@ type ExamRow = {
 };
 
 type MetricDef = {
-  key: string; // unique
+  key: string;
   label: string;
   unit?: string;
-  // JSON path trong payload_inputs, dot-notation
-  // Ví dụ bạn có thể đổi cho đúng schema thực tế:
-  // "biometry.OD.AL", "biometry.OD.ACD", "biometry.OD.LT"
-  path: string;
-  // Hàm chuyển đổi nếu cần (vd: string -> number)
+  path: string; // dot-notation trong payload_inputs
   map?: (v: unknown) => number | string | null;
 };
 
-type Props = {
-  patientId: string;
-};
+type Props = { patientId: string };
 
 // ==== cấu hình metric mặc định ====
 const METRICS: MetricDef[] = [
-  {
-    key: "od_al",
-    label: "AL OD",
-    unit: "mm",
-    path: "biometry.OD.AL",
-    map: toNumberOrNull,
-  },
-  {
-    key: "od_acd",
-    label: "ACD OD",
-    unit: "mm",
-    path: "biometry.OD.ACD",
-    map: toNumberOrNull,
-  },
-  {
-    key: "od_lt",
-    label: "LT OD",
-    unit: "mm",
-    path: "biometry.OD.LT",
-    map: toNumberOrNull,
-  },
-  // Thêm OS nếu cần
-  {
-    key: "os_al",
-    label: "AL OS",
-    unit: "mm",
-    path: "biometry.OS.AL",
-    map: toNumberOrNull,
-  },
+  { key: "od_al", label: "AL OD", unit: "mm", path: "biometry.OD.AL", map: toNumberOrNull },
+  { key: "od_acd", label: "ACD OD", unit: "mm", path: "biometry.OD.ACD", map: toNumberOrNull },
+  { key: "od_lt", label: "LT OD", unit: "mm", path: "biometry.OD.LT", map: toNumberOrNull },
+  { key: "os_al", label: "AL OS", unit: "mm", path: "biometry.OS.AL", map: toNumberOrNull },
 ];
 
 export default function CompareExamsMyopia({ patientId }: Props) {
@@ -88,10 +49,10 @@ export default function CompareExamsMyopia({ patientId }: Props) {
   // fetch exams
   useEffect(() => {
     let active = true;
-    async function run() {
+    (async () => {
       setLoading(true);
       setError(null);
-      const query = supabase
+      const { data, error: err } = await supabase
         .from("exams")
         .select(
           "id, patient_id, exam_date, exam_type, status, payload_inputs, created_at"
@@ -100,7 +61,6 @@ export default function CompareExamsMyopia({ patientId }: Props) {
         .order("exam_date", { ascending: true })
         .order("created_at", { ascending: true });
 
-      const { data, error: err } = await query;
       if (!active) return;
       if (err) {
         setError(err.message ?? "Fetch error");
@@ -109,17 +69,16 @@ export default function CompareExamsMyopia({ patientId }: Props) {
         setRows((data ?? []) as ExamRow[]);
       }
       setLoading(false);
-    }
-    run();
+    })();
     return () => {
       active = false;
     };
   }, [patientId]);
 
-  const filtered = useMemo(() => {
-    const base = onlyFinal ? rows.filter((r) => r.status === "final") : rows;
-    return base;
-  }, [rows, onlyFinal]);
+  const filtered = useMemo(
+    () => (onlyFinal ? rows.filter((r) => r.status === "final") : rows),
+    [rows, onlyFinal]
+  );
 
   const selectedMetrics = useMemo(
     () => METRICS.filter((m) => selectedKeys.includes(m.key)),
@@ -128,16 +87,18 @@ export default function CompareExamsMyopia({ patientId }: Props) {
 
   const table = useMemo(() => {
     return filtered.map((r) => {
-      // nơi tạo obj trong useMemo
-        const obj: Record<string, unknown> = {
-          date: prettyDate(r.exam_date),
-          type: r.exam_type,
-        };
+      const obj: Record<string, unknown> = {
+        date: prettyDate(r.exam_date),
+        type: r.exam_type,
+      };
+
+      for (const m of selectedMetrics) {
         const raw = getAtPath(r.payload_inputs ?? {}, m.path);
         const mapped = (m.map ? m.map(raw) : raw) as string | number | null;
-        obj[m.key] = mapped === null || mapped === undefined || mapped === "" ? null : mapped;
-
+        obj[m.key] =
+          mapped === null || mapped === undefined || mapped === "" ? null : mapped;
       }
+
       return obj;
     });
   }, [filtered, selectedMetrics]);
@@ -162,7 +123,7 @@ export default function CompareExamsMyopia({ patientId }: Props) {
               checked={onlyFinal}
               onChange={(e) => setOnlyFinal(e.target.checked)}
             />
-            Chỉ hiển thị bản “final”
+            Chỉ hiển thị bản &quot;final&quot;
           </label>
           <button
             className="px-3 py-1.5 rounded-xl border text-sm hover:bg-gray-100"
@@ -227,7 +188,7 @@ export default function CompareExamsMyopia({ patientId }: Props) {
                   <Td>{row.date as string}</Td>
                   <Td>{row.type as string}</Td>
                   {selectedMetrics.map((m) => (
-                    <Td key={m.key}>{fmt(row[m.key])}</Td>
+                    <Td key={m.key}>{fmt((row as Record<string, unknown>)[m.key])}</Td>
                   ))}
                 </tr>
               ))
@@ -293,7 +254,6 @@ function getAtPath(obj: unknown, path: string): unknown {
   return cur;
 }
 
-
 function fmt(v: unknown): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "number") return Number.isFinite(v) ? String(v) : "—";
@@ -304,7 +264,6 @@ function fmt(v: unknown): string {
 function prettyDate(d: string | null | undefined): string {
   if (!d) return "—";
   try {
-    // d có thể là "2025-09-08" hoặc ISO
     const dt = new Date(d);
     if (Number.isNaN(dt.getTime())) return d;
     const yyyy = dt.getFullYear();
@@ -312,7 +271,7 @@ function prettyDate(d: string | null | undefined): string {
     const dd = String(dt.getDate()).padStart(2, "0");
     return `${dd}/${mm}/${yyyy}`;
   } catch {
-    return d;
+    return d ?? "—";
   }
 }
 
@@ -346,7 +305,8 @@ function NoteBlock() {
   return (
     <div className="text-xs opacity-70">
       Goi y: doi cac <code>path</code> trong cau hinh metric cho dung khoa thuc te
-      trong <code>payload_inputs</code>. Vi du <code>biometry.OD.AL</code>, <code>biometry.OS.AL</code>. Khong can sua logic.
+      trong <code>payload_inputs</code>. Vi du <code>biometry.OD.AL</code>,{" "}
+      <code>biometry.OS.AL</code>. Khong can sua logic.
     </div>
   );
 }
