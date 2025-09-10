@@ -35,7 +35,7 @@ async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
   const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
   if (error) { setErr(error.message); setBusy(false); return; }
 
-  // Lấy session rồi GỌI callback để server set cookie
+  // Lấy session và GỌI callback để server set cookie
   const { data } = await supabase.auth.getSession();
   try {
     await fetch("/api/auth/callback", {
@@ -43,9 +43,9 @@ async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ event: "SIGNED_IN", session: data.session }),
     });
-  } catch (_) {}
+  } catch {}
 
-  router.replace(AFTER_LOGIN);
+  router.replace("/patients/search");
   router.refresh();
   setBusy(false);
 }
