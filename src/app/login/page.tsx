@@ -28,15 +28,28 @@ export default function LoginPage() {
     return () => subscription.unsubscribe();
   }, [router]);
 
-  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setBusy(true); setErr(null);
-    const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
-    if (error) { setErr(error.message); setBusy(false); return; }
-    const { data } = await supabase.auth.getSession();
-    if (data.session) { router.replace(AFTER_LOGIN); router.refresh(); }
-    setBusy(false);
-  }
+async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+  e.preventDefault();
+  setBusy(true); setErr(null);
+
+  const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
+  if (error) { setErr(error.message); setBusy(false); return; }
+
+  // Lấy session rồi GỌI callback để server set cookie
+  const { data } = await supabase.auth.getSession();
+  try {
+    await fetch("/api/auth/callback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event: "SIGNED_IN", session: data.session }),
+    });
+  } catch (_) {}
+
+  router.replace(AFTER_LOGIN);
+  router.refresh();
+  setBusy(false);
+}
+
 
   return (
     <main className="min-h-screen flex items-center justify-center p-6">
