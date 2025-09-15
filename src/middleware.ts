@@ -6,19 +6,5 @@ export const config = {
 };
 
 export default function middleware(req: NextRequest) {
-  const has =
-    req.cookies.get("sb-access-token")?.value ||
-    req.cookies.get("sb-refresh-token")?.value;
-
-  // chặn trang bảo vệ
-  if (!has && req.nextUrl.pathname !== "/login") {
-    return NextResponse.redirect(new URL("/login", req.url));
-  }
-
-  // đã đăng nhập mà vào /login -> đẩy sang app
-  if (has && req.nextUrl.pathname === "/login") {
-    return NextResponse.redirect(new URL("/patients/search", req.url));
-  }
-
-  return NextResponse.next();
+  return NextResponse.next(); // tắt kiểm tra
 }
