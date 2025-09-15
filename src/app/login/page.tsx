@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
-const AFTER_LOGIN = "/patients/search";
+const AFTER_LOGIN = "/";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -45,7 +45,7 @@ async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     });
   } catch {}
 
-  router.replace("/patients/search");
+  router.replace("/");
   router.refresh();
   setBusy(false);
 }
