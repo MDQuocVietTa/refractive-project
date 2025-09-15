@@ -6,5 +6,20 @@ export const config = {
 };
 
 export default function middleware(req: NextRequest) {
-  return NextResponse.next(); // tắt kiểm tra
+  // Tìm cookie Supabase auth (bắt đầu bằng "sb-" và kết thúc bằng "-auth-token")
+  const hasSupabaseAuth = req.cookies
+    .getAll()
+    .some(c => c.name.startsWith("sb-") && c.name.endsWith("-auth-token"));
+
+  // chưa đăng nhập => ép về /login
+  if (!hasSupabaseAuth && req.nextUrl.pathname !== "/login") {
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
+  // đã đăng nhập mà vào /login => ép sang /patients/search
+  if (hasSupabaseAuth && req.nextUrl.pathname === "/login") {
+    return NextResponse.redirect(new URL("/patients/search", req.url));
+  }
+
+  return NextResponse.next();
 }
